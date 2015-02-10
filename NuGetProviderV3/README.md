@@ -1,0 +1,1 @@
+﻿NuGet v3 Provider for OneGet (C#)
