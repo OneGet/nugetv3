@@ -5,6 +5,8 @@ VisualStudioVersion = 14.0.22310.1
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NuGetProviderV3", "NuGetProviderV3\NuGetProviderV3.csproj", "{33B3D35E-E9E2-4A2C-8094-5D0BC60CC4DD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NuGetProviderV3Tests", "NuGetProviderV3Tests\NuGetProviderV3Tests.csproj", "{C2907428-85F1-44A2-9114-E760ECA0C89E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{33B3D35E-E9E2-4A2C-8094-5D0BC60CC4DD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{33B3D35E-E9E2-4A2C-8094-5D0BC60CC4DD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{33B3D35E-E9E2-4A2C-8094-5D0BC60CC4DD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C2907428-85F1-44A2-9114-E760ECA0C89E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C2907428-85F1-44A2-9114-E760ECA0C89E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C2907428-85F1-44A2-9114-E760ECA0C89E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C2907428-85F1-44A2-9114-E760ECA0C89E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

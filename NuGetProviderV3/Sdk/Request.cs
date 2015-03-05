@@ -22,7 +22,7 @@ namespace OneGet.Sdk {
     
     public abstract class Request {
         private Dictionary<string, string[]> _options;
-        private string[] _packageSources;
+        private string[] _packageSources = null;
 
         #region OneGet Interfaces
         public interface IProviderServices {

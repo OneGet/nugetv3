@@ -15,30 +15,38 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Threading;
+using NuGet.Client;
+using NuGet.Client.VisualStudio;
 using OneGet.Sdk;
+using System.Management.Automation;
+using System.Text.RegularExpressions;
+using NuGet;
+using NuGet.Frameworks;
+using NuGet.PackagingCore;
+using NuGet.Versioning;
+using Constants = OneGet.Sdk.Constants;
+using ErrorCategory = OneGet.Sdk.ErrorCategory;
 
-namespace OneGet
+namespace Microsoft.OneGet.NuGetProviderV3
 {
     /// <summary>
     /// A NuGet v3 Package provider for OneGet.
     /// </summary>
     public class NuGetV3PackageProvider
     {
+        private const int SearchPageSize = 40;
+
         /// <summary>
         /// The features that this package supports.
         /// </summary>
         protected static Dictionary<string, string[]> Features = new Dictionary<string, string[]> {
-
-            // specify the extensions that your provider uses for its package files (if you have any)
-            { Constants.Features.SupportedExtensions, new[]{"nupkg"}},
-
-            // you can list the URL schemes that you support searching for packages with
-            { Constants.Features.SupportedSchemes, new [] {"http", "https", "file"}},
-
-            // you can list the magic signatures (bytes at the beginning of a file) that we can use 
-            // to peek and see if a given file is yours.
-            { Constants.Features.MagicSignatures, Constants.Signatures.ZipVariants},
+            {Constants.Features.SupportsPowerShellModules, Constants.FeaturePresent},
+            {Constants.Features.SupportedSchemes, new[] {"http", "https", "file"}},
+            {Constants.Features.SupportedExtensions, new[] {"nupkg"}},
+            {Constants.Features.MagicSignatures, new[] {Constants.Signatures.Zip}},
         };
 
 
@@ -78,9 +86,7 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void InitializeProvider(Request request)
         {
-            // TODO: improve this debug message that tells what's going on.
             request.Debug("Calling '{0}::InitializeProvider'", PackageProviderName);
-            // TODO: add any one-time initialization code here, or remove this method
         }
 
         /// <summary>
@@ -89,13 +95,9 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void GetFeatures(Request request)
         {
-            // TODO: improve this debug message that tells what's going on.
             request.Debug("Calling '{0}::GetFeatures' ", PackageProviderName);
 
-            foreach (var feature in Features)
-            {
-                request.Yield(feature);
-            }
+            request.Yield(Features);
         }
 
         /// <summary>
@@ -109,29 +111,30 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void GetDynamicOptions(string category, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::GetDynamicOptions' {1}", PackageProviderName, category);
 
             switch ((category ?? string.Empty).ToLowerInvariant())
             {
-                case "install":
-                    // TODO: put the options supported for install/uninstall/getinstalledpackages
-
-                    break;
-
-                case "provider":
-                    // TODO: put the options used with this provider (so far, not used by OneGet?).
-
+                case "package":
+                    request.YieldDynamicOption("FilterOnTag", Constants.OptionType.StringArray, false);
+                    request.YieldDynamicOption("Contains", Constants.OptionType.String, false);
+                    request.YieldDynamicOption("AllowPrereleaseVersions", Constants.OptionType.Switch, false);
                     break;
 
                 case "source":
-                    // TODO: put any options for package sources
-
+                    request.YieldDynamicOption("ConfigFile", Constants.OptionType.String, false);
+                    request.YieldDynamicOption("SkipValidate", Constants.OptionType.Switch, false);
                     break;
 
-                case "package":
-                    // TODO: put any options used when searching for packages 
-
+                    // applies to Get-Package, Install-Package, Uninstall-Package
+                case "install":
+                    request.YieldDynamicOption("Destination", Constants.OptionType.Path, true);
+                    request.YieldDynamicOption("SkipDependencies", Constants.OptionType.Switch, false);
+                    request.YieldDynamicOption("ContinueOnFailure", Constants.OptionType.Switch, false);
+                    request.YieldDynamicOption("ExcludeVersion", Constants.OptionType.Switch, false);
+                    request.YieldDynamicOption("PackageSaveMode", Constants.OptionType.String, false, new[] {
+                        "nuspec", "nupkg", "nuspec;nupkg"
+                    });
                     break;
                 default:
                     request.Debug("Unknown category for '{0}::GetDynamicOptions': {1}", PackageProviderName, category);
@@ -149,18 +152,51 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void ResolvePackageSources(Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::ResolvePackageSources'", PackageProviderName);
 
-            // TODO: resolve package sources
             if (request.Sources.Any())
             {
                 // the system is requesting sources that match the values passed.
                 // if the value passed can be a legitimate source, but is not registered, return a package source marked unregistered.
+                var packageSources = ProviderStorage.GetPackageSources(request);
+
+                if (request.IsCanceled)
+                {
+                    return;
+                }
+
+                foreach (var source in request.Sources.AsNotNull())
+                {
+                    if (packageSources.ContainsKey(source))
+                    {
+                        var packageSource = packageSources[source];
+
+                        // YieldPackageSource returns false when operation was cancelled
+                        if (!request.YieldPackageSource(packageSource.Name, packageSource.Location, packageSource.Trusted, packageSource.IsRegistered, packageSource.IsValidated))
+                        {
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        request.Warning("Package Source '{0}' not found.", source);
+                    }
+                }
             }
             else
             {
                 // the system is requesting all the registered sources
+                var packageSources = ProviderStorage.GetPackageSources(request);
+                foreach (var entry in packageSources.AsNotNull())
+                {
+                    var packageSource = entry.Value;
+
+                    // YieldPackageSource returns false when operation was cancelled
+                    if (!request.YieldPackageSource(packageSource.Name, packageSource.Location, packageSource.Trusted, packageSource.IsRegistered, packageSource.IsValidated))
+                    {
+                        return;
+                    }
+                }
             }
         }
 
@@ -174,10 +210,8 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void AddPackageSource(string name, string location, bool trusted, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::AddPackageSource' '{1}','{2}','{3}'", PackageProviderName, name, location, trusted);
-
-            // TODO: support user-defined package sources OR remove this method
+            ProviderStorage.AddPackageSource(name, location, trusted, request);
         }
 
         /// <summary>
@@ -187,10 +221,8 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void RemovePackageSource(string name, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::RemovePackageSource' '{1}'", PackageProviderName, name);
-
-            // TODO: support user-defined package sources OR remove this method
+            ProviderStorage.RemovePackageSource(name, request);
         }
 
 
@@ -207,10 +239,85 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void FindPackage(string name, string requiredVersion, string minimumVersion, string maximumVersion, int id, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::FindPackage' '{1}','{2}','{3}','{4}'", PackageProviderName, requiredVersion, minimumVersion, maximumVersion, id);
 
-            // TODO: find package by name (and version) or id...
+            List<PackageSource> sources;
+            var providerPackageSources = ProviderStorage.GetPackageSources(request);
+
+            if (request.PackageSources != null && request.PackageSources.Any())
+            {
+                sources =  new List<PackageSource>();
+
+                foreach (var userRequestedSource in request.PackageSources)
+                {
+                    if (providerPackageSources.ContainsKey(userRequestedSource))
+                    {
+                        sources.Add(providerPackageSources[userRequestedSource]);
+                    }
+                }
+            }
+            else
+            {
+                sources = providerPackageSources.Select(i => i.Value).ToList();
+            }
+
+            var searchTerm = ReplacePowerShellWildcards(name);
+
+            // Wildcard pattern matching configuration.
+            const WildcardOptions wildcardOptions = WildcardOptions.CultureInvariant | WildcardOptions.IgnoreCase;
+            var wildcardPattern = new WildcardPattern(String.IsNullOrEmpty(name) ? "*" : name, wildcardOptions);
+
+            if (request.IsCanceled)
+            {
+                return;
+            }
+
+            foreach (var packageSource in sources.AsNotNull())
+            {
+                var repo = RepositoryFactory.CreateV3(packageSource.Location);
+                var search = repo.GetResource<UISearchResource>();
+
+                for (int i = 0; true; i += SearchPageSize)
+                {
+                    List<UISearchMetadata> results;
+
+                    try
+                    {
+                        var task = search.Search(searchTerm, new SearchFilter(), i, SearchPageSize, CancellationToken.None);
+                        task.Wait();
+                        results = task.Result.ToList();
+                    }
+                    catch (NullReferenceException)
+                    {
+                        // usually means the source was incorrect, skip to the next source
+                        break;
+                    }
+
+                    foreach (var result in results.AsNotNull())
+                    {
+                        if (!wildcardPattern.IsMatch(result.Identity.Id))
+                        {
+                            continue;
+                        }
+
+                        var package = new DataServicePackage() { Id = result.Identity.Id, Version = result.Identity.Version.ToString(), Summary = result.Summary, Authors = result.LatestPackageMetadata.Authors, Title = result.Title, IconUrl = result.IconUrl, Owners = result.LatestPackageMetadata.Owners, Description = result.LatestPackageMetadata.Description, Tags = result.LatestPackageMetadata.Tags, LicenseUrl = result.LatestPackageMetadata.LicenseUrl, ProjectUrl = result.LatestPackageMetadata.ProjectUrl, Published = result.LatestPackageMetadata.Published, ReportAbuseUrl = result.LatestPackageMetadata.ReportAbuseUrl };
+                        var fastPath = packageSource.MakeFastPath(result.Identity.Id, result.Identity.Version.ToString());
+
+                        var packageItem = new PackageItem() { Id = result.Identity.Id, Version = result.Identity.Version.ToString(), FastPath = fastPath, Package = package, IsPackageFile = false, PackageSource = packageSource, FullPath = String.Empty };
+
+                        // YieldPackage returns false when operation was cancelled
+                        if (!request.YieldPackage(packageItem, name))
+                        {
+                            return;
+                        }
+                    }
+
+                    if (!results.Any())
+                    {
+                        break;
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -223,10 +330,7 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void FindPackageByFile(string file, int id, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::FindPackageByFile' '{1}','{2}'", PackageProviderName, file, id);
-
-            // TODO: implement searching for a package by analyzing the package file, or remove this method
         }
 
         /// <summary>
@@ -241,10 +345,7 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void FindPackageByUri(Uri uri, int id, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::FindPackageByUri' '{1}','{2}'", PackageProviderName, uri, id);
-
-            // TODO: implement searching for a package by it's unique uri (or remove this method)
         }
 
         /// <summary>
@@ -255,28 +356,73 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void DownloadPackage(string fastPackageReference, string location, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::DownloadPackage' '{1}','{2}'", PackageProviderName, fastPackageReference, location);
 
-            // TODO: actually download the package ...
+            string source;
+            string id;
+            string version;
+            if (!fastPackageReference.TryParseFastPath(out source, out id, out version))
+            {
+                request.Error(ErrorCategory.InvalidArgument, fastPackageReference, Strings.InvalidFastPath, fastPackageReference);
+            }
 
+            PackageIdentity packageIdentity = new PackageIdentity(id, new NuGetVersion(version));
+
+            var repo = RepositoryFactory.CreateV3(source);
+
+            var download = repo.GetResource<DownloadResource>();
+
+            var downloadTask = download.GetStream(packageIdentity, CancellationToken.None);
+            downloadTask.Wait();
+            using (var result = downloadTask.Result)
+            {
+                using (var output = new FileStream(location, FileMode.Create, FileAccess.Write, FileShare.Read))
+                {
+                    result.CopyTo(output);
+                }
+            }
         }
 
         /// <summary>
+        /// THIS API WILL BE DEPRECATED
         /// Returns package references for all the dependent packages
+        /// This is called by Find-Package -IncludeDependencies and returned as a flat list
+        /// As well as Install-Package -WhatIf
         /// </summary>
         /// <param name="fastPackageReference"></param>
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void GetPackageDependencies(string fastPackageReference, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::GetPackageDependencies' '{1}'", PackageProviderName, fastPackageReference);
 
-            // TODO: check dependencies
+            string source;
+            string id;
+            string version;
+            if (!fastPackageReference.TryParseFastPath(out source, out id, out version))
+            {
+                request.Error(ErrorCategory.InvalidArgument, fastPackageReference, Strings.InvalidFastPath, fastPackageReference);
+            }
 
+            PackageIdentity packageIdentity = new PackageIdentity(id, new NuGetVersion(version));
+
+            var repo = RepositoryFactory.CreateV3(source);
+
+            var dependencyResolver = repo.GetResource<DepedencyInfoResource>();
+
+            var dependenciesTask = dependencyResolver.ResolvePackages(packageIdentity.AsEnumerable(), NuGetFramework.AnyFramework, false, CancellationToken.None);
+            dependenciesTask.Wait();
+            var results = dependenciesTask.Result;
+
+            // TODO: Yield
+            foreach (var result in results)
+            {
+                foreach (var dependency in result.Dependencies)
+                {
+                    //dependency.Id;
+                    //dependency.VersionRange;
+                }
+            }
         }
-
-
 
         /// <summary>
         /// Installs a given package.
@@ -285,10 +431,27 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void InstallPackage(string fastPackageReference, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::InstallPackage' '{1}'", PackageProviderName, fastPackageReference);
 
-            // TODO: Install the package 
+            string source;
+            string id;
+            string version;
+            if (!fastPackageReference.TryParseFastPath(out source, out id, out version))
+            {
+                request.Error(ErrorCategory.InvalidArgument, fastPackageReference, Strings.InvalidFastPath, fastPackageReference);
+            }
+
+            PackageIdentity packageIdentity = new PackageIdentity(id, new NuGetVersion(version));
+
+            var repo = RepositoryFactory.CreateV3(source);
+
+            var dependencyResolver = repo.GetResource<DepedencyInfoResource>();
+
+            // TODO: needs implementation:
+            // 1) Figure out installed packages
+            // 2) Resolve missing dependencies
+            // 3) Download the package + dependencies
+            // 4) Unzip
         }
 
         /// <summary>
@@ -298,10 +461,23 @@ namespace OneGet
         /// <param name="request">An object passed in from the CORE that contains functions that can be used to interact with the CORE and HOST</param>
         public void UninstallPackage(string fastPackageReference, Request request)
         {
-            // TODO: improve this debug message that tells us what's going on.
             request.Debug("Calling '{0}::UninstallPackage' '{1}'", PackageProviderName, fastPackageReference);
 
-            // TODO: Uninstall the package 
+            string source;
+            string id;
+            string version;
+            if (!fastPackageReference.TryParseFastPath(out source, out id, out version))
+            {
+                request.Error(ErrorCategory.InvalidArgument, fastPackageReference, Strings.InvalidFastPath, fastPackageReference);
+            }
+
+            PackageIdentity packageIdentity = new PackageIdentity(id, new NuGetVersion(version));
+
+            var repo = RepositoryFactory.CreateV3(source);
+
+            var dependencyResolver = repo.GetResource<DepedencyInfoResource>();
+
+            // TODO: need implementation
         }
 
         /// <summary>
@@ -357,5 +533,29 @@ namespace OneGet
             // TODO: batch search implementation
         }
 
+        /// <summary>
+        /// NuGet does not support PowerShell/POSIX style wildcards and supports only '*' in searchTerm with NuGet.exe
+        /// Replace the range from '[' - to ']' with * and ? with * then wildcard pattern is applied on the results from NuGet.exe
+        /// </summary>
+        /// <param name="name">Search term</param>
+        /// <returns>NuGet-compatible query term</returns>
+        private string ReplacePowerShellWildcards(string name)
+        {
+            if (!String.IsNullOrEmpty(name) && WildcardPattern.ContainsWildcardCharacters(name))
+            {
+
+                var tempName = name;
+                var squareBracketPattern = Regex.Escape("[") + "(.*?)]";
+                foreach (Match match in Regex.Matches(tempName, squareBracketPattern))
+                {
+                    tempName = tempName.Replace(match.Value, "*");
+                }
+                var searchTerm = tempName.Replace("?", "*");
+
+                return searchTerm.Replace("*", " ");
+            }
+
+            return name;
+        }
     }
 }
